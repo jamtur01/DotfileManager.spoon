@@ -70,6 +70,9 @@ function obj:runCommand(cmd)
         elseif output:find("No such remote 'origin'") then
             self:logInfo("Remote origin not set. This is expected for a new repository.")
             return false, output
+        elseif output:find("nothing to commit, working tree clean") then
+            self:logInfo("Nothing to commit, working tree clean.")
+            return false, output
         else
             -- For other errors, log them as actual errors
             self:logError("Command failed: " .. cmd .. "\nOutput: " .. (output or ""))
@@ -287,16 +290,12 @@ end
 -- Check if the remote origin is set up in the Git repository
 function obj:hasRemoteOrigin()
     local status, output = self:runGitCommand("remote get-url origin")
-    
-    -- No need to handle specific errors here; runCommand will handle it
     return status
 end
 
 -- Check if there are any commits in the repository
 function obj:checkForCommits()
     local status, output = self:runGitCommand("rev-parse HEAD")
-    
-    -- No need to handle specific errors here; runCommand will handle it
     return status
 end
 
@@ -386,7 +385,6 @@ function obj:setUpTrackingBranch()
     return true
 end
 
--- Adjust log levels to use debug for excluded files
 function obj:shouldIgnore(path)
     local relativePath = path:gsub("^" .. os.getenv("HOME") .. "/", "")
     for _, pattern in ipairs(self.ignorePatterns) do
@@ -488,9 +486,9 @@ function obj:commitAndPush()
         local commitMessage = string.format("Configuration changes committed for %s by %s on %s.", hostname, username, dateTime)
 
         -- Commit changes
-        status, output = self:runGitCommand(string.format("commit -m \"%s\"", commitMessage:gsub('"', '\\"')))
-        if not status then
-            self:logError("Failed to commit changes: " .. output)
+        local commitStatus, commitOutput = self:runGitCommand(string.format("commit -m '%s'", commitMessage))
+        if not commitStatus then
+            self:logError("Failed to commit changes: " .. commitOutput)
             self:notifyError("Dotfile Manager", "Failed to commit changes. Check the log for details.")
             return
         end
