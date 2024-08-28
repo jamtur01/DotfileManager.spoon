@@ -3,7 +3,7 @@ obj.__index = obj
 
 -- Metadata
 obj.name = "DotfileManager"
-obj.version = "2.5"
+obj.version = "2.6"
 obj.author = "James Turnbull <james@lovedthanlost.net>"
 obj.homepage = "https://github.com/jamtur01/DotfileManager.spoon"
 obj.license = "MIT - https://opensource.org/licenses/MIT"
