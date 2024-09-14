@@ -36,7 +36,8 @@ local defaultIgnorePatterns = {
     "*.tmp",
     ".DS_Store",
     ".ssh/*",
-    ".gnupg/*"
+    ".gnupg/*",
+    ".git/",
 }
 
 obj.defaultInterval = 3600 -- default interval in seconds (1 hour)
@@ -60,7 +61,7 @@ end
 -- Helper to run commands and log the results with more granular error handling
 function obj:runCommand(cmd)
     self:logDebug("Executing command: " .. cmd)
-    local output, status = hs.execute(cmd .. " 2>&1")
+    local output, status, t, rc = hs.execute(cmd .. " 2>&1")
     
     if not status then
         -- Handle specific expected errors gracefully
@@ -82,7 +83,6 @@ function obj:runCommand(cmd)
     end
     return status, output
 end
-
 
 -- Improved runCommand to handle dynamic Git arguments
 function obj:runGitCommand(args)
@@ -198,18 +198,6 @@ function obj:checkAndCreateDirectory(path)
     return true
 end
 
--- Helper: Copy a file with logging
-function obj:copyFileWithLogging(src, dest)
-    local cmd = string.format("cp '%s' '%s'", src, dest)
-    local status, output = self:runCommand(cmd)
-    if not status then
-        self:logError("Copy failed for " .. src .. ": " .. output)
-    else
-        self:logDebug("Copied file: " .. src)
-    end
-    return status
-end
-
 -- Helper: Send error notification
 function obj:notifyError(title, message)
     hs.notify.new({title=title, informativeText=message}):send()
@@ -237,17 +225,11 @@ function obj:updateGitignore()
         existingPatterns[line] = true
     end
 
-    -- Function to convert absolute paths to relative paths
-    local function toRelativePath(path)
-        return path:gsub("^" .. os.getenv("HOME") .. "/", "")
-    end
-
     -- Add patterns from ignorePatterns that aren't already in .gitignore
     for _, pattern in ipairs(self.ignorePatterns) do
-        local relativePattern = toRelativePath(pattern)
-        if not existingPatterns[relativePattern] then
-            table.insert(gitignoreContents, relativePattern)
-            existingPatterns[relativePattern] = true
+        if not existingPatterns[pattern] then
+            table.insert(gitignoreContents, pattern)
+            existingPatterns[pattern] = true
         end
     end
 
@@ -289,13 +271,13 @@ end
 
 -- Check if the remote origin is set up in the Git repository
 function obj:hasRemoteOrigin()
-    local status, output = self:runGitCommand("remote get-url origin")
+    local status, _ = self:runGitCommand("remote get-url origin")
     return status
 end
 
 -- Check if there are any commits in the repository
 function obj:checkForCommits()
-    local status, output = self:runGitCommand("rev-parse HEAD")
+    local status, _ = self:runGitCommand("rev-parse HEAD")
     return status
 end
 
@@ -306,7 +288,6 @@ function obj:setUpRemoteOrigin()
         return false
     end
 
-    -- Check for the remote origin, if not set, attempt to set it
     if not self:hasRemoteOrigin() then
         self:logDebug("Setting up remote origin...")
         local cmd = string.format("remote add origin %s", self.remoteOrigin)
@@ -319,25 +300,20 @@ function obj:setUpRemoteOrigin()
             return false
         end
     end
-    
+
     self:logDebug("Remote origin already exists.")
     return true
 end
 
 function obj:setUpTrackingBranch()
-    -- Check for commits, if none exist, create an initial commit
     if not self:checkForCommits() then
         self:logInfo("No commits found. Creating initial README.md and committing...")
-        
-        -- Retrieve the hostname and username
+
         local hostname = hs.host.localizedName()
         local username = os.getenv("USER")
-        
-        -- Create the README.md content
         local readmeContent = string.format("# Dotfiles for %s on %s", username, hostname)
         local readmePath = self.gitRepo .. "/README.md"
-        
-        -- Write the README.md file
+
         local file = io.open(readmePath, "w")
         if file then
             file:write(readmeContent .. "\n")
@@ -348,8 +324,7 @@ function obj:setUpTrackingBranch()
             self:notifyError("Dotfile Manager", "Failed to create README.md. Check the log for details.")
             return false
         end
-        
-        -- Stage and commit the README.md file
+
         self:runGitCommand("add README.md")
         local cmd = string.format("commit -m 'Initial commit with README.md'")
         local success, output = self:runGitCommand(cmd)
@@ -361,7 +336,6 @@ function obj:setUpTrackingBranch()
         self:logDebug("Initial commit with README.md created.")
     end
 
-    -- Check if the remote repository exists
     local remoteExists, output = self:runGitCommand(string.format("ls-remote %s", self.remoteOrigin))
     if not remoteExists then
         self:logError(string.format("The remote repository '%s' does not exist or is unreachable. Git output: %s", self.remoteOrigin, output or ""))
@@ -369,7 +343,6 @@ function obj:setUpTrackingBranch()
         return false
     end
 
-    -- Ensure that the tracking branch is set up
     local success, output = self:runGitCommand("push --set-upstream origin main")
     if not success then
         if output:find("fetch first") then
@@ -388,8 +361,7 @@ end
 function obj:shouldIgnore(path)
     local relativePath = path:gsub("^" .. os.getenv("HOME") .. "/", "")
     for _, pattern in ipairs(self.ignorePatterns) do
-        local relativePattern = pattern:gsub("^" .. os.getenv("HOME") .. "/", "")
-        if string.match(relativePath, relativePattern) then
+        if string.match(relativePath, pattern) then
             self:logDebug("Excluded: " .. relativePath)
             return true
         end
@@ -398,79 +370,75 @@ function obj:shouldIgnore(path)
 end
 
 function obj:copyFiles(src, dest)
-    -- Ensure the destination directory exists
     if not self:checkAndCreateDirectory(dest) then
         return
     end
 
-    -- Recursive function to copy files that are not excluded
-    local function recursiveCopy(source, destination)
-        local attr = hs.fs.attributes(source)
-
-        -- Ensure we have valid attributes for the source
-        if not attr then
-            self:logError("Failed to get attributes for " .. source)
-            return
-        end
-
-        -- Handle directories
-        if attr.mode == "directory" then
-            -- Get all the files in the current directory
-            for file in hs.fs.dir(source) do
-                if file ~= "." and file ~= ".." then
-                    local srcPath = source .. "/" .. file
-                    local destPath = destination .. "/" .. file
-                    local fileAttr = hs.fs.attributes(srcPath)
-
-                    if not fileAttr then
-                        self:logError("Failed to get attributes for " .. srcPath)
-                    elseif fileAttr.mode == "directory" then
-                        -- Skip directories that are git repositories
-                        if self:isGitRepo(srcPath) then
-                            self:logDebug("Skipping git repository: " .. srcPath)
-                        else
-                            -- Create the corresponding directory in the destination
-                            if self:checkAndCreateDirectory(destPath) then
-                                -- Recursively copy the contents of the directory
-                                recursiveCopy(srcPath, destPath)
-                            end
-                        end
-                    elseif fileAttr.mode == "file" then
-                        -- Ensure the file is not ignored
-                        if not self:shouldIgnore(srcPath) then
-                            -- Copy the file
-                            self:copyFileWithLogging(srcPath, destPath)
-                        else
-                            self:logDebug("Excluded: " .. srcPath)
-                        end
-                    end
-                end
-            end
-        elseif attr.mode == "file" then
-            -- If the source is a file, just copy it
-            if not self:shouldIgnore(source) then
-                self:copyFileWithLogging(source, destination)
-            else
-                self:logDebug("Excluded: " .. source)
-            end
-        else
-            self:logError("Unsupported file type for " .. source)
-        end
+    -- Build the rsync command
+    local excludePatterns = ""
+    for _, pattern in ipairs(self.ignorePatterns) do
+        excludePatterns = excludePatterns .. string.format(" --exclude='%s'", pattern)
     end
 
-    -- Start the recursive copy process
-    recursiveCopy(src, dest)
+    -- Ensure .git directories are excluded
+    excludePatterns = excludePatterns .. " --exclude='.git/'"
+
+    local cmd = string.format("rsync -avh --delete %s '%s/' '%s/'", excludePatterns, src, dest)
+    local status, output = self:runCommand(cmd)
+    if not status then
+        self:logError("Rsync failed for " .. src .. ": " .. output)
+        self:notifyError("Dotfile Manager", "Rsync failed. Check the log for details.")
+    else
+        self:logDebug("Synchronized files from " .. src .. " to " .. dest)
+    end
+end
+
+function obj:copyDotfile(file, dest)
+    local fileName = file:match("([^/]+)$")
+    local destFile = dest .. "/" .. fileName
+
+    local fileAttr = hs.fs.attributes(file)
+    if fileAttr then
+        if not self:shouldIgnore(file) then
+            self:copyFileWithLogging(file, destFile)
+        else
+            self:logDebug("Excluded: " .. file)
+        end
+    else
+        local destAttr = hs.fs.attributes(destFile)
+        if destAttr then
+            local cmd = string.format("rm -f '%s'", destFile)
+            local status, output = self:runCommand(cmd)
+            if not status then
+                self:logError("Failed to remove deleted dotfile " .. destFile .. ": " .. output)
+            else
+                self:logDebug("Removed deleted dotfile: " .. destFile)
+            end
+        end
+    end
+end
+
+function obj:copyFileWithLogging(src, dest)
+    local cmd = string.format("cp '%s' '%s'", src, dest)
+    local status, output = self:runCommand(cmd)
+    if not status then
+        self:logError("Copy failed for " .. src .. ": " .. output)
+    else
+        self:logDebug("Copied file: " .. src)
+    end
+    return status
 end
 
 function obj:commitAndPush()
-    -- Check git status for changes
     local status, output = self:runGitCommand("status --porcelain")
 
     if status then
-        -- Log the output of git status for debugging purposes
-        self:logDebug("Git status output:\n" .. output)
+        if output == "" then
+            self:logInfo("No changes detected. Repository is up-to-date.")
+            return
+        end
 
-        -- Stage the changes for commit
+        self:logDebug("Git status output:\n" .. output)
         local addStatus, addOutput = self:runGitCommand("add .")
         if not addStatus then
             self:logError("Failed to stage changes: " .. addOutput)
@@ -478,14 +446,11 @@ function obj:commitAndPush()
             return
         end
 
-        -- Generate commit message with hostname, username, and current date/time
         local hostname = hs.host.localizedName()
         local username = os.getenv("USER")
         local dateTime = os.date("%A %x at %X %p %Z")
-
         local commitMessage = string.format("Configuration changes committed for %s by %s on %s.", hostname, username, dateTime)
 
-        -- Commit changes
         local commitStatus, commitOutput = self:runGitCommand(string.format("commit -m '%s'", commitMessage))
         if not commitStatus then
             self:logError("Failed to commit changes: " .. commitOutput)
@@ -493,7 +458,6 @@ function obj:commitAndPush()
             return
         end
 
-        -- Push changes with automatic pull/rebase on failure
         if self:pushChanges() then
             self:logInfo("Dotfiles updated and pushed to repo successfully.")
             hs.notify.new({title="Dotfile Manager", informativeText="Dotfiles updated and pushed to repo successfully."}):send()
@@ -519,7 +483,7 @@ function obj:pushChanges()
             end
         end
     end
-    
+
     if status then
         self:logInfo("Changes pushed successfully.")
         return true
@@ -535,62 +499,42 @@ function obj:updateDotfiles()
         return
     end
 
-    -- Ensure that the repository path exists and is initialized as a Git repository
     if not self:checkAndCreateDirectory(self.gitRepo) then
         self:logError("Failed to create or verify the repository directory: " .. self.gitRepo)
         return
     end
 
-    -- Initialize Git repository if it's not already initialized
-    if not self:isGitRepo(self.gitRepo) then
-        self:logDebug("Git repository not found, initializing...")
-        if not self:initGitRepo() then
-            self:logError("Failed to initialize Git repository at: " .. self.gitRepo)
-            return
-        end
+    if not self:initGitRepo() then
+        self:logError("Failed to initialize Git repository at: " .. self.gitRepo)
+        return
     end
 
-    -- Ensure the remote origin is set up
     if not self:setUpRemoteOrigin() then
         self:logError("Failed to set up remote origin.")
         return
     end
 
-    -- Ensure the tracking branch is set up
     if not self:setUpTrackingBranch() then
         self:logError("Failed to set up tracking branch.")
         return
     end
 
-    -- Ensure the .gitignore file is updated
     self:updateGitignore()
 
-    -- Check for changes in dotfile paths (directories)
     for _, path in ipairs(self.dotfilePaths) do
-        -- Skip the directory if it's a git repository
+        -- Check if path is a git repository
         if self:isGitRepo(path) then
             self:logDebug("Skipping git repository: " .. path)
         else
-            -- Ensure the directory exists in the destination repo
             local repoPath = self.gitRepo .. "/" .. path:match("([^/]+)$")
-            if self:checkAndCreateDirectory(repoPath) then
-                self:copyFiles(path, repoPath)
-            else
-                self:logError("Failed to ensure directory exists: " .. repoPath)
-            end
+            self:copyFiles(path, repoPath)
         end
     end
 
-    -- Check for changes in individual dotfiles (files)
     for _, file in ipairs(self.dotfiles) do
-        local fileName = file:match("([^/]+)$")
-        if not self:shouldIgnore(fileName) then
-            -- Copy the file
-            self:copyFiles(file, self.gitRepo)
-        end
+        self:copyDotfile(file, self.gitRepo)
     end
 
-    -- Commit and push changes
     self:commitAndPush()
 end
 
